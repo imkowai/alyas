@@ -49,6 +49,10 @@ An unlisted card's system-copy price is 4x the greater of the rarity reference f
 * test/: smoke tests (run with npm test in Node 22).
 * .github/workflows/test.yml: GitHub Actions test runner.
 
-Only owned cards, their compact metadata snapshots and player assets are stored. The entire AniList catalogue is **never imported**. AniList queries are temporarily cached to limit traffic; imagery must be used in accordance with source and copyright permissions.
+Only owned cards, their compact metadata snapshots and player assets are stored. **No character catalogue is imported.** When AniList returns an upstream 403, 429, 5xx, or network error, the Worker automatically tries Jikan's MyAnimeList API for on-demand anime and character data. Jikan IDs are stored as negative integers to avoid collisions with positive AniList IDs. Cloudflare caching reduces upstream pressure. A fallback is still unavailable if both providers fail. AniList queries are temporarily cached to limit traffic; imagery must be used in accordance with source and copyright permissions.
 
 **Production note:** GitHub pushes do not auto-deploy yet. The Worker is currently deployed manually through Cloudflare's API. Future code edits require a redeploy or a configured Cloudflare Workers Builds integration. A valid bot token and webhook signing secret are still required to activate events.
+
+## Upstream 403 troubleshooting
+
+AniList's API documentation states that HTTP 403 may indicate temporarily suspended access or an IP restriction; it is not the normal HTTP 429 rate-limit response. The Worker now treats these as an upstream failure and tries the alternative Jikan/MyAnimeList public API. If the fallback is also unavailable, the bot reports the two provider failures without charging credits. No proxy is used to circumvent AniList access restrictions.
