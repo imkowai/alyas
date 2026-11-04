@@ -53,7 +53,7 @@ let anilistUnavailableUntil=0;
 async function anilist(query,variables){
  const key='https://alyas-cache.invalid/anilist/v2/'+encodeURIComponent(JSON.stringify({query,variables}));
  const cache=caches.default, req=new Request(key);
- const hit=await cache.match(req);
+ const hit=await cache.match(req).catch(()=>null);
  if(hit)return hit.json();
  if(Date.now()<anilistUnavailableUntil)throw new Error('AniList is temporarily unavailable (cached failure).');
  let r;
@@ -74,18 +74,18 @@ async function anilist(query,variables){
  const data=await r.json();
  if(data.errors?.length)throw new Error('AniList GraphQL error: '+String(data.errors[0]?.message||'upstream error').slice(0,130));
  if(!data.data)throw new Error('AniList response lacked data');
- await cache.put(req,new Response(JSON.stringify(data.data),{headers:{'Cache-Control':'public,max-age=900','Content-Type':'application/json'}}));
+ void cache.put(req,new Response(JSON.stringify(data.data),{headers:{'Cache-Control':'public,max-age=900','Content-Type':'application/json'}})).catch(()=>{});
  return data.data;
 }
 async function jikan(path,cacheable=true){
  const url='https://api.jikan.moe/v4'+path;
  const cache=caches.default, cacheRequest=new Request('https://alyas-cache.invalid/jikan/v1/'+encodeURIComponent(path));
- if(cacheable){const hit=await cache.match(cacheRequest);if(hit)return hit.json();}
+ if(cacheable){const hit=await cache.match(cacheRequest).catch(()=>null);if(hit)return hit.json();}
  const r=await fetch(url,{headers:{'Accept':'application/json','User-Agent':'AlyasBot/1.0 (+https://github.com/imkowai/alyas)'},signal:AbortSignal.timeout(3500)});
  if(!r.ok)throw new Error('Jikan HTTP '+r.status);
  const data=await r.json();
  if(!Array.isArray(data?.data)&&!data?.data)throw new Error('Jikan response lacked data');
- if(cacheable)await cache.put(cacheRequest,new Response(JSON.stringify(data),{headers:{'Cache-Control':'public,max-age=1200','Content-Type':'application/json'}}));
+ if(cacheable)void cache.put(cacheRequest,new Response(JSON.stringify(data),{headers:{'Cache-Control':'public,max-age=1200','Content-Type':'application/json'}})).catch(()=>{});
  return data;
 }
 async function randomCharacterAniList(anime){
@@ -160,7 +160,7 @@ async function withDeadline(promise,ms,label){
 async function api(env,method,path,payload){
  if(!env.YAPIN_BOT_TOKEN)throw new Error('Yapin bot token is not configured.');
  const r=await fetch(API+path,{method,headers:{Authorization:'Bot '+env.YAPIN_BOT_TOKEN,'Content-Type':'application/json'},
-  body:payload===undefined?undefined:JSON.stringify(payload),signal:AbortSignal.timeout(6500)});
+  body:payload===undefined?undefined:JSON.stringify(payload),signal:AbortSignal.timeout(4500)});
  const raw=await r.text();
  let data={};try{data=raw?JSON.parse(raw):{}}catch{data={error:raw.slice(0,180)}}
  if(!r.ok)throw new Error('Yapin API '+r.status+': '+(data.error||data.message||'request failed'));
