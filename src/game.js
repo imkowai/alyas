@@ -18,18 +18,12 @@ export async function roll(db,userId,anime=''){
   const character=await randomCharacter(anime);
   const rarity=rollTier();
   // The update and insert are one D1 transaction; any failed insert rolls back the debit.
-  const result=await db.batch([
-    db.prepare('UPDATE players SET credits=credits-? WHERE user_id=? AND credits>=? RETURNING credits').bind(cost,userId,cost),
-    db.prepare('INSERT INTO character_mints(character_id,last_mint) VALUES(?,1) ON CONFLICT(character_id) DO UPDATE SET last_mint=last_mint+1 RETURNING last_mint').bind(character.characterId),
-  ]);
-  // NOTE: D1 batch is atomic, but a conditional debit with zero rows is not an SQL error.
-  // Roll writes MUST use a single guarded SQL transaction/stored operation in production.
-  if(!result[0].results?.length)throw new Error('Not enough credits');
-  const mint=result[1].results[0].last_mint;
-  const inserted=await db.prepare('INSERT INTO cards(anilist_character_id,anilist_media_id,character_name,media_name,image_url,owner_id,rarity,mint_number) VALUES(?,?,?,?,?,?,?,?) RETURNING uid')
-    .bind(character.characterId,character.mediaId,character.name,character.anime,character.image,userId,rarity,mint).first();
-  await db.prepare('INSERT INTO ledger(user_id,delta,reason,card_uid) VALUES(?,?,?,?)').bind(userId,-cost,'roll',inserted.uid).run();
-  return {...character,rarity,mint,uid:uid(inserted.uid),cost};
+  // Do not mint until credit deduction, mint allocation and ownership insertion
+  // can be committed atomically with an idempotent Yapin interaction ID.
+  // A multi-query implementation without a transaction could charge users
+  // without issuing a card or duplicate mints under concurrent rolls.
+  throw new Error('Roll persistence is not enabled until atomic purchase handling is configured');
+
 }
 export async function sell(db,userId,cardUid,price){
   if(!Number.isSafeInteger(price)||price<=0)throw new Error('Price must be a positive integer');
