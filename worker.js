@@ -315,8 +315,16 @@ async function handleCommand(ev,env){
   if(name==='roll'){
    const animation=await reply(ev,env,{content:'🎲 **Alya’s is shuffling the cards...** ✦'});
    const msgId=animation?.message?.id||animation?.id||null;
+   if(msgId){
+    await new Promise(done=>setTimeout(done,420));
+    try{await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(msgId),{content:'✨ **A card is emerging from the deck...** 🌌'})}catch{}
+   }
    try{
     const candidate=await reserveRoll(db,id,args,env);
+    if(msgId){
+     try{await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(msgId),{content:'💫 **Revealing the card and its rarity...**'})}catch{}
+     await new Promise(done=>setTimeout(done,500));
+    }
     if(args){
      const fields={...candidate,uid:'UNMINTED',mint:0};
      embeds=[cardEmbed(fields,'Preview • '+nfmt(candidate.cost)+' credits to keep • expires in 15 min')];
