@@ -77,9 +77,9 @@ async function anilist(query,variables){
  void cache.put(req,new Response(JSON.stringify(data.data),{headers:{'Cache-Control':'public,max-age=900','Content-Type':'application/json'}})).catch(()=>{});
  return data.data;
 }
-async function jikan(path,cacheable=true){
- const url='https://api.jikan.moe/v4'+path;
- const cache=caches.default, cacheRequest=new Request('https://alyas-cache.invalid/jikan/v1/'+encodeURIComponent(path));
+async function jikan(path,cacheable=true,base='https://api.jikan.moe/v4'){
+ const url=base+path;
+ const cache=caches.default, cacheRequest=new Request('https://alyas-cache.invalid/jikan/v2/'+encodeURIComponent(base+path));
  if(cacheable){const hit=await cache.match(cacheRequest).catch(()=>null);if(hit)return hit.json();}
  const r=await fetch(url,{headers:{'Accept':'application/json','User-Agent':'AlyasBot/1.0 (+https://github.com/imkowai/alyas)'},signal:AbortSignal.timeout(3500)});
  if(!r.ok)throw new Error('Jikan HTTP '+r.status);
@@ -109,11 +109,12 @@ async function randomCharacterAniList(anime){
  }
  throw new Error('AniList returned no eligible illustrated characters');
 }
-async function randomCharacterJikan(anime){
+async function randomCharacterJikan(anime,base='https://api.jikan.moe/v4'){
+ const fetchMal=(path,cacheable=true)=>jikan(path,cacheable,base);
  const search=(anime||'').trim();
  let matches=null;
  if(search){
-  const list=await jikan('/anime?q='+encodeURIComponent(search)+'&sfw=true&limit=10');
+  const list=await fetchMal('/anime?q='+encodeURIComponent(search)+'&sfw=true&limit=10');
   matches=(list.data||[]).filter(m=>m?.mal_id&&m.rating!=='Rx - Hentai'&&!String(m.rating||'').startsWith('R+'));
   if(!matches.length)throw new Error('No anime found for "'+search+'"');
  }
@@ -123,13 +124,13 @@ async function randomCharacterJikan(anime){
    show=matches.find(m=>[m.title,m.title_english].some(n=>n?.toLowerCase()===search.toLowerCase()))||matches[attempt%matches.length];
   }else{
    // The random endpoint samples the full catalogue without importing it.
-   const pick=await jikan('/random/anime',false);
+   const pick=await fetchMal('/random/anime',false);
    show=pick.data;
    if(show?.rating==='Rx - Hentai'||String(show?.rating||'').startsWith('R+'))continue;
   }
   if(!show?.mal_id)continue;
   let chars;
-  try{chars=(await jikan('/anime/'+show.mal_id+'/characters')).data||[]}
+  try{chars=(await fetchMal('/anime/'+show.mal_id+'/characters')).data||[]}
   catch(e){if(matches)throw e;continue}
   const valid=chars.map(x=>x.character).filter(ch=>ch?.mal_id&&ch.name&&imageSafe(ch.images?.jpg?.image_url||ch.images?.webp?.image_url));
   if(!valid.length)continue;
@@ -142,15 +143,18 @@ async function randomCharacterJikan(anime){
  throw new Error('Jikan returned no eligible illustrated characters.');
 }
 async function randomCharacter(anime,env){
- try{return await withDeadline(randomCharacterAniList(anime),5500,'AniList timed out')}
- catch(upstreamError){
-  console.warn('AniList unavailable; falling back to Jikan: '+String(upstreamError));
-  try{return await withDeadline(randomCharacterJikan(anime),8500,'Fallback anime lookup timed out')}
-  catch(fallbackError){
-   console.error('Anime data sources failed:',String(fallbackError));
-   throw new Error('Anime sources unavailable right now. AniList: '+String(upstreamError.message||upstreamError).slice(0,100)+'. Jikan: '+String(fallbackError.message||fallbackError).slice(0,100)+'.');
-  }
- }
+ const failures=[];
+ if(Date.now()>=anilistUnavailableUntil){
+  try{return await withDeadline(randomCharacterAniList(anime),4000,'AniList timeout')}
+  catch(err){failures.push('AniList '+String(err.message||err).slice(0,70));}
+ }else failures.push('AniList unavailable');
+ // Tenrai is a cached public MAL catalogue API, supports character lookup and bots.
+ try{return await withDeadline(randomCharacterJikan(anime,'https://api.tenrai.org/v1'),8000,'Tenrai timeout')}
+ catch(err){failures.push('Tenrai '+String(err.message||err).slice(0,70));}
+ // Jikan is last resort, since its live MAL scraper can stall.
+ try{return await withDeadline(randomCharacterJikan(anime),5000,'Jikan timeout')}
+ catch(err){failures.push('Jikan '+String(err.message||err).slice(0,70));}
+ throw new Error('All anime data providers failed: '+failures.join('; ').slice(0,260));
 }
 async function withDeadline(promise,ms,label){
  let timer;
