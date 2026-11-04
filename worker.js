@@ -211,8 +211,13 @@ async function send(env,ch,body){
  return api(env,'POST','/channels/'+encodeURIComponent(ch)+'/messages',body);
 }
 async function editOrSend(env,ch,id,body){
- if(id)try{return await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(id),body)}catch(e){console.warn('Edit failed',String(e))}
- return send(env,ch,body);
+ if(id){
+  try{return await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(id),body)}
+  catch(e){console.warn('Editing roll message failed; posting new final result',String(e))}
+ }
+ const posted=await send(env,ch,body);
+ if(id)try{await api(env,'DELETE','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(id))}catch{}
+ return posted;
 }
 function errMsg(e){
  const s=String(e?.message||e||'Unknown error');
@@ -480,7 +485,8 @@ async function handleButton(ev,env){
 }
 async function processEvent(ev,env){
  try{
-  await syncCommands(env.DB,env);
+  try{await withDeadline(syncCommands(env.DB,env),3000,'Command sync timed out')}
+  catch(e){console.warn('Command sync did not complete; processing event anyway:',String(e))}
   const type=ev.event||ev.type, data=ev.data||{};
   if(type==='command')return await handleCommand(ev,env);
   if(type==='message'&&data.command&&(!data.command_for||data.command_for===env.YAPIN_BOT_ID))
