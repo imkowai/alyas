@@ -47,41 +47,110 @@ function rarity(boosted=false) {
  for(const x of data){if(pick<x.weight)return x.name;pick-=x.weight;}
  return 'common';
 }
-const imageSafe = u => typeof u==='string' && /^https:\/\/s4\.anilist\.co\//i.test(u) ? u : null;
-async function anilist(query,variables,env){
- const key='https://alyas-cache.invalid/v1/'+encodeURIComponent(JSON.stringify({query,variables}));
+const imageSafe = u => typeof u==='string' &&
+ /^https:\/\/(?:s4\.anilist\.co|cdn\.myanimelist\.net)\//i.test(u) ? u : null;
+let anilistUnavailableUntil=0;
+async function anilist(query,variables){
+ const key='https://alyas-cache.invalid/anilist/v2/'+encodeURIComponent(JSON.stringify({query,variables}));
  const cache=caches.default, req=new Request(key);
  const hit=await cache.match(req);
  if(hit)return hit.json();
- const r=await fetch(ANI,{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},
-  body:JSON.stringify({query,variables})});
- if(!r.ok)throw new Error('AniList is unavailable ('+r.status+'). Try again later.');
+ if(Date.now()<anilistUnavailableUntil)throw new Error('AniList is temporarily unavailable (cached failure).');
+ let r;
+ try{
+  r=await fetch(ANI,{method:'POST',
+   headers:{'Content-Type':'application/json','Accept':'application/json'},
+   body:JSON.stringify({query,variables})});
+ }catch(e){
+  anilistUnavailableUntil=Date.now()+120000;
+  throw new Error('AniList connection failed');
+ }
+ if(!r.ok){
+  const sample=(await r.text()).slice(0,300);
+  console.warn('AniList returned '+r.status+': '+sample);
+  if([403,429,500,502,503,504].includes(r.status))anilistUnavailableUntil=Date.now()+120000;
+  throw new Error('AniList HTTP '+r.status);
+ }
  const data=await r.json();
- if(data.errors?.length)throw new Error('AniList could not find that anime.');
- const res=data.data;
- await cache.put(req,new Response(JSON.stringify(res),{headers:{'Cache-Control':'public,max-age=900','Content-Type':'application/json'}}));
- return res;
+ if(data.errors?.length)throw new Error('AniList GraphQL error: '+String(data.errors[0]?.message||'upstream error').slice(0,130));
+ if(!data.data)throw new Error('AniList response lacked data');
+ await cache.put(req,new Response(JSON.stringify(data.data),{headers:{'Cache-Control':'public,max-age=900','Content-Type':'application/json'}}));
+ return data.data;
 }
-async function randomCharacter(anime,env){
+async function jikan(path,cacheable=true){
+ const url='https://api.jikan.moe/v4'+path;
+ const cache=caches.default, cacheRequest=new Request('https://alyas-cache.invalid/jikan/v1/'+encodeURIComponent(path));
+ if(cacheable){const hit=await cache.match(cacheRequest);if(hit)return hit.json();}
+ const r=await fetch(url,{headers:{'Accept':'application/json','User-Agent':'AlyasBot/1.0 (+https://github.com/imkowai/alyas)'}});
+ if(!r.ok)throw new Error('Jikan HTTP '+r.status);
+ const data=await r.json();
+ if(!Array.isArray(data?.data)&&!data?.data)throw new Error('Jikan response lacked data');
+ if(cacheable)await cache.put(cacheRequest,new Response(JSON.stringify(data),{headers:{'Cache-Control':'public,max-age=1200','Content-Type':'application/json'}}));
+ return data;
+}
+async function randomCharacterAniList(anime){
  const search=(anime||'').trim();
- const Q1='query($page:Int,$search:String){Page(page:$page,perPage:20){pageInfo{lastPage}media(type:ANIME,search:$search,sort:POPULARITY_DESC){id title{romaji english}}}}';
+ const Q1='query($page:Int,$search:String){Page(page:$page,perPage:20){pageInfo{lastPage}media(type:ANIME,search:$search,sort:POPULARITY_DESC,isAdult:false){id title{romaji english}}}}';
  const Q2='query($id:Int,$page:Int){Media(id:$id,type:ANIME){characters(page:$page,perPage:25,sort:ROLE){pageInfo{lastPage}nodes{id name{full}image{large}}}}}';
- const start=await anilist(Q1,{page:1,search:search||null},env);
- const first=start.Page, maxPage=Math.max(1,first?.pageInfo?.lastPage||1);
- if(!first?.media?.length)throw new Error('No anime found by that name.');
- for(let i=0;i<5;i++){
-  const listing=search ? first : await anilist(Q1,{page:1+rand(maxPage),search:null},env).then(x=>x.Page);
+ const start=await anilist(Q1,{page:1,search:search||null});
+ const first=start.Page,maxPage=Math.max(1,first?.pageInfo?.lastPage||1);
+ if(!first?.media?.length)throw new Error('No anime found by that name on AniList');
+ for(let i=0;i<4;i++){
+  const listing=search ? first : (await anilist(Q1,{page:1+rand(maxPage),search:null})).Page;
   if(!listing?.media?.length)continue;
   const show=search ? (listing.media.find(m=>[m.title.english,m.title.romaji].some(n=>n?.toLowerCase()===search.toLowerCase()))||listing.media[0]) : choose(listing.media);
-  const initial=await anilist(Q2,{id:show.id,page:1},env);
-  const connection=initial.Media?.characters, last=connection?.pageInfo?.lastPage||1;
-  const picked=last>1 ? await anilist(Q2,{id:show.id,page:1+rand(last)},env) : initial;
+  const initial=await anilist(Q2,{id:show.id,page:1});
+  const conn=initial.Media?.characters,last=conn?.pageInfo?.lastPage||1;
+  const picked=last>1 ? await anilist(Q2,{id:show.id,page:1+rand(last)}) : initial;
   const chars=(picked.Media?.characters?.nodes||[]).filter(c=>c?.id&&c.name?.full&&imageSafe(c.image?.large));
   if(!chars.length)continue;
   const ch=choose(chars);
-  return {characterId:ch.id,mediaId:show.id,name:ch.name.full,anime:show.title.english||show.title.romaji,image:imageSafe(ch.image.large)};
+  return {characterId:ch.id,mediaId:show.id,name:ch.name.full,anime:show.title.english||show.title.romaji,image:imageSafe(ch.image.large),source:'anilist'};
  }
- throw new Error('Could not find an illustrated character. Try again.');
+ throw new Error('AniList returned no eligible illustrated characters');
+}
+async function randomCharacterJikan(anime){
+ const search=(anime||'').trim();
+ let matches=null;
+ if(search){
+  const list=await jikan('/anime?q='+encodeURIComponent(search)+'&sfw=true&limit=10');
+  matches=(list.data||[]).filter(m=>m?.mal_id&&m.rating!=='Rx - Hentai'&&!String(m.rating||'').startsWith('R+'));
+  if(!matches.length)throw new Error('No anime found for "'+search+'"');
+ }
+ for(let attempt=0;attempt<4;attempt++){
+  let show;
+  if(matches){
+   show=matches.find(m=>[m.title,m.title_english].some(n=>n?.toLowerCase()===search.toLowerCase()))||matches[attempt%matches.length];
+  }else{
+   // The random endpoint samples the full catalogue without importing it.
+   const pick=await jikan('/random/anime',false);
+   show=pick.data;
+   if(show?.rating==='Rx - Hentai'||String(show?.rating||'').startsWith('R+'))continue;
+  }
+  if(!show?.mal_id)continue;
+  let chars;
+  try{chars=(await jikan('/anime/'+show.mal_id+'/characters')).data||[]}
+  catch(e){if(matches)throw e;continue}
+  const valid=chars.map(x=>x.character).filter(ch=>ch?.mal_id&&ch.name&&imageSafe(ch.images?.jpg?.image_url||ch.images?.webp?.image_url));
+  if(!valid.length)continue;
+  const ch=choose(valid);
+  // Jikan uses MyAnimeList IDs. Negative IDs keep them distinct from AniList IDs
+  // while preserving current D1 schema and stable mint serials for each provider.
+  return {characterId:-ch.mal_id,mediaId:-show.mal_id,name:ch.name,
+   anime:show.title_english||show.title,image:imageSafe(ch.images?.jpg?.image_url||ch.images?.webp?.image_url),source:'myanimelist'};
+ }
+ throw new Error('Jikan returned no eligible illustrated characters.');
+}
+async function randomCharacter(anime,env){
+ try{return await randomCharacterAniList(anime)}
+ catch(upstreamError){
+  console.warn('AniList unavailable; falling back to Jikan: '+String(upstreamError));
+  try{return await randomCharacterJikan(anime)}
+  catch(fallbackError){
+   console.error('Anime data sources failed:',String(fallbackError));
+   throw new Error('Anime sources unavailable right now. AniList: '+String(upstreamError.message||upstreamError).slice(0,100)+'. Jikan: '+String(fallbackError.message||fallbackError).slice(0,100)+'.');
+  }
+ }
 }
 async function api(env,method,path,payload){
  if(!env.YAPIN_BOT_TOKEN)throw new Error('Yapin bot token is not configured.');
@@ -122,7 +191,7 @@ function cardEmbed(card,footer){
    {name:'Mint',value:uid(card.mint||card.mint_number),inline:true},
    {name:'Edition',value:card.edition||'Standard',inline:true}
   ],...(imageSafe(card.image||card.image_url)?{image:{url:card.image||card.image_url}}:{}),
-  footer:{text:footer||"Alya's • character metadata by AniList"}};
+  footer:{text:footer||("Alya's • character data via "+((card.mediaId||card.anilist_media_id)<0?'MyAnimeList / Jikan':'AniList'))}};
 }
 async function reply(ev,env,body){
  const data=ev.data, type=ev.event||ev.type;
