@@ -60,7 +60,7 @@ async function anilist(query,variables){
  try{
   r=await fetch(ANI,{method:'POST',
    headers:{'Content-Type':'application/json','Accept':'application/json'},
-   body:JSON.stringify({query,variables})});
+   body:JSON.stringify({query,variables}),signal:AbortSignal.timeout(4000)});
  }catch(e){
   anilistUnavailableUntil=Date.now()+120000;
   throw new Error('AniList connection failed');
@@ -81,7 +81,7 @@ async function jikan(path,cacheable=true){
  const url='https://api.jikan.moe/v4'+path;
  const cache=caches.default, cacheRequest=new Request('https://alyas-cache.invalid/jikan/v1/'+encodeURIComponent(path));
  if(cacheable){const hit=await cache.match(cacheRequest);if(hit)return hit.json();}
- const r=await fetch(url,{headers:{'Accept':'application/json','User-Agent':'AlyasBot/1.0 (+https://github.com/imkowai/alyas)'}});
+ const r=await fetch(url,{headers:{'Accept':'application/json','User-Agent':'AlyasBot/1.0 (+https://github.com/imkowai/alyas)'},signal:AbortSignal.timeout(3500)});
  if(!r.ok)throw new Error('Jikan HTTP '+r.status);
  const data=await r.json();
  if(!Array.isArray(data?.data)&&!data?.data)throw new Error('Jikan response lacked data');
@@ -117,7 +117,7 @@ async function randomCharacterJikan(anime){
   matches=(list.data||[]).filter(m=>m?.mal_id&&m.rating!=='Rx - Hentai'&&!String(m.rating||'').startsWith('R+'));
   if(!matches.length)throw new Error('No anime found for "'+search+'"');
  }
- for(let attempt=0;attempt<4;attempt++){
+ for(let attempt=0;attempt<2;attempt++){
   let show;
   if(matches){
    show=matches.find(m=>[m.title,m.title_english].some(n=>n?.toLowerCase()===search.toLowerCase()))||matches[attempt%matches.length];
@@ -142,20 +142,25 @@ async function randomCharacterJikan(anime){
  throw new Error('Jikan returned no eligible illustrated characters.');
 }
 async function randomCharacter(anime,env){
- try{return await randomCharacterAniList(anime)}
+ try{return await withDeadline(randomCharacterAniList(anime),5500,'AniList timed out')}
  catch(upstreamError){
   console.warn('AniList unavailable; falling back to Jikan: '+String(upstreamError));
-  try{return await randomCharacterJikan(anime)}
+  try{return await withDeadline(randomCharacterJikan(anime),8500,'Fallback anime lookup timed out')}
   catch(fallbackError){
    console.error('Anime data sources failed:',String(fallbackError));
    throw new Error('Anime sources unavailable right now. AniList: '+String(upstreamError.message||upstreamError).slice(0,100)+'. Jikan: '+String(fallbackError.message||fallbackError).slice(0,100)+'.');
   }
  }
 }
+async function withDeadline(promise,ms,label){
+ let timer;
+ try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(label)),ms)})])}
+ finally{clearTimeout(timer)}
+}
 async function api(env,method,path,payload){
  if(!env.YAPIN_BOT_TOKEN)throw new Error('Yapin bot token is not configured.');
  const r=await fetch(API+path,{method,headers:{Authorization:'Bot '+env.YAPIN_BOT_TOKEN,'Content-Type':'application/json'},
-  body:payload===undefined?undefined:JSON.stringify(payload)});
+  body:payload===undefined?undefined:JSON.stringify(payload),signal:AbortSignal.timeout(6500)});
  const raw=await r.text();
  let data={};try{data=raw?JSON.parse(raw):{}}catch{data={error:raw.slice(0,180)}}
  if(!r.ok)throw new Error('Yapin API '+r.status+': '+(data.error||data.message||'request failed'));
@@ -382,36 +387,41 @@ async function handleCommand(ev,env){
  try{
   let result, embeds, components;
   if(name==='roll'){
-   const animation=await reply(ev,env,{content:'🎲 **Alya’s is shuffling the cards...** ✦'});
-   const msgId=animation?.message?.id||animation?.id||null;
-   if(msgId){
-    await new Promise(done=>setTimeout(done,420));
-    try{await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(msgId),{content:'✨ **A card is emerging from the deck...** 🌌'})}catch{}
+   // Ack slash-command quickly. Never depend on editing an interaction response:
+   // Yapin can return 204/no message ID for interaction callbacks.
+   if((ev.event||ev.type)==='command'||(ev.event||ev.type)==='interaction'){
+    await api(env,'POST','/interactions/'+encodeURIComponent(data.id)+'/'+encodeURIComponent(data.token)+'/callback',{type:'ack'});
    }
+   // Use a normal channel message so we receive a stable ID for edits.
+   // If the channel send fails, surface an error through normal event handling.
+   const started=await send(env,ch,{content:'🎲 **Shuffling the cards...** ✦'});
+   const msgId=started?.message?.id||started?.id||null;
+   let result,embeds=[],components=[];
    try{
-    const candidate=await reserveRoll(db,id,args,env);
+    const candidate=await withDeadline(reserveRoll(db,id,args,env),13500,'Character lookup timed out; please retry.');
     if(msgId){
-     try{await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(msgId),{content:'💫 **Revealing the card and its rarity...**'})}catch{}
-     await new Promise(done=>setTimeout(done,500));
+     try{await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(msgId),{content:'✨ **Revealing your card...**'})}catch(err){console.warn('Roll frame update unavailable',String(err))}
     }
     if(args){
-     const fields={...candidate,uid:'UNMINTED',mint:0};
-     embeds=[cardEmbed(fields,'Preview • '+nfmt(candidate.cost)+' credits to keep • expires in 15 min')];
-     // Preview cards have no UID or mint until the user pays.
+     embeds=[cardEmbed({...candidate,uid:'UNMINTED',mint:0},'Preview • '+nfmt(candidate.cost)+' credits to keep • expires in 15 min')];
      embeds[0].fields=[{name:'Status',value:'Preview only',inline:true},
       {name:'Rarity',value:candidate.rarity,inline:true},{name:'Keep price',value:nfmt(candidate.cost)+' credits',inline:true}];
      components=[{type:'row',components:[
       {type:'button',style:'success',label:'Keep (100× cost)',custom_id:'keep:'+candidate.id},
       {type:'button',style:'secondary',label:'Discard',custom_id:'discard:'+candidate.id}
      ]}];
-     result='✨ **You rolled from '+candidate.anime+'!** Keep it for '+nfmt(candidate.cost)+' credits.';
+     result='✨ **'+candidate.name+'** from '+candidate.anime+'! Keep for '+nfmt(candidate.cost)+' credits.';
     }else{
-     const card=await claim(db,candidate.id,id);
+     const card=await withDeadline(claim(db,candidate.id,id),5000,'Card save timed out; check /collection before retrying.');
      embeds=[cardEmbed(card,'Automatically added to your collection • Cost: 10 credits')];
      result='✨ **New card!** '+card.name+' · '+card.rarity.toUpperCase()+' · '+card.uid;
     }
-   }catch(e){result='❌ '+errMsg(e);embeds=[];components=[];}
-   await editOrSend(env,ch,msgId,{content:result,embeds,components});return;
+   }catch(err){
+    console.error('Roll failed',String(err));
+    result='❌ **Roll failed:** '+errMsg(err)+' No credits should be spent if the card was not issued.';
+   }
+   await editOrSend(env,ch,msgId,{content:result,embeds,components});
+   return;
   }
   if(name==='credits'){
    const p=await ensurePlayer(db,id);
