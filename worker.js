@@ -191,8 +191,8 @@ const ANIME_ALIASES=Object.freeze({
  'sao':'Sword Art Online','sword art':'Sword Art Online',
  'ngnl':'No Game No Life','mp100':'Mob Psycho 100',
  'mob psycho':'Mob Psycho 100','nge':'Neon Genesis Evangelion',
- 're zero':'Re:ZERO -Starting Life in Another World-',
- 'rezero':'Re:ZERO -Starting Life in Another World-',
+ 're zero':'Re:Zero',
+ 'rezero':'Re:Zero',
  'konosuba':'KonoSuba: God’s Blessing on This Wonderful World!',
  'mushoku':'Mushoku Tensei: Jobless Reincarnation',
  'jobless reincarnation':'Mushoku Tensei: Jobless Reincarnation',
@@ -278,9 +278,9 @@ export function rankAnimeMatches(shows,queryInfo){
    else if(tokens.length>1&&tokens.every(t=>title.split(' ').some(w=>w.startsWith(t))))
     best=Math.max(best,220);
   }
-  if(best===0&&index===0)best=100;
+  // A bad Kitsu full-text match must not silently select an unrelated anime.
   return{show,score:best+sequelPenalty(show,queryInfo.season),index};
- }).sort((a,b)=>b.score-a.score||a.index-b.index).map(x=>x.show);
+ }).filter(x=>x.score>=180).sort((a,b)=>b.score-a.score||a.index-b.index).map(x=>x.show);
 }
 async function randomCharacterKitsu(anime){
  const search=(anime||'').trim();
@@ -288,12 +288,13 @@ async function randomCharacterKitsu(anime){
   const queryInfo=resolveAnimeQuery(search);
   let found=await kitsuGet('/anime?filter%5Btext%5D='+encodeURIComponent(queryInfo.query)+'&page%5Blimit%5D=20');
   let list=(found.data||[]).filter(x=>x?.id&&x?.attributes?.ageRating!=='R18');
-  if(!list.length&&queryInfo.aliasFound&&normalizeAnimeTitle(queryInfo.query)!==normalizeAnimeTitle(queryInfo.original)){
+  let choices=rankAnimeMatches(list,queryInfo);
+  if(!choices.length&&queryInfo.aliasFound&&normalizeAnimeTitle(queryInfo.query)!==normalizeAnimeTitle(queryInfo.original)){
    found=await kitsuGet('/anime?filter%5Btext%5D='+encodeURIComponent(queryInfo.original)+'&page%5Blimit%5D=20');
    list=(found.data||[]).filter(x=>x?.id&&x?.attributes?.ageRating!=='R18');
+   choices=rankAnimeMatches(list,queryInfo);
   }
-  if(!list.length)throw new Error('No anime found for "'+search+'". Try the full title.');
-  const choices=rankAnimeMatches(list,queryInfo);
+  if(!choices.length)throw new Error('No matching anime for "'+search+'". Try another title or a longer name.');
   for(const show of choices.slice(0,7)){
    let data=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20');
    const total=Number(data.meta?.count||0);
