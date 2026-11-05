@@ -352,7 +352,7 @@ async function randomCharacter(anime,env){
  try{const selected=await withDeadline(randomCharacterKitsu(anime),9000,'Kitsu lookup timed out');return await enrichMALPortrait(selected)}
  catch(primary){
   // Invalid search or missing characters is a useful user error, not a provider outage.
-  if(/No anime matching|No illustrated characters found/.test(String(primary.message||primary)))throw primary;
+  if(/No (?:anime matching|anime found|matching anime|illustrated characters found)/.test(String(primary.message||primary)))throw primary;
   console.warn('Kitsu provider failed:',String(primary));
   try{return await withDeadline(randomCharacterAniList(anime),4000,'AniList timed out')}
   catch(al){console.warn('AniList backup failed:',String(al))}
