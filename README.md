@@ -20,7 +20,7 @@ Event webhook: https://alyas-bot.revidue.workers.dev/webhook
 
 | Command | Meaning |
 | --- | --- |
-| /roll | Roll randomly from Kitsu's on-demand anime-character catalogue for 10 credits; card auto-kept |
+| /roll | Roll randomly across Kitsu anime-character relationships, then enrich the selected character with MAL artwork when available, for 10 credits; card auto-kept |
 | /roll Naruto | Preview a random Naruto character; costs 1,000 credits (100x) only if you click Keep |
 | /credits | Show virtual credits |
 | /collection | Show the latest 20 cards in your collection |
@@ -43,7 +43,7 @@ An unlisted card's system-copy price is 4x the greater of the rarity reference f
 
 ## Technology and deployment
 
-* worker.js: complete deployed Cloudflare Worker for webhook verification, Kitsu character queries (AniList/Jikan emergency backups), cooldowns, boosts, crates, market, and wallet/card management.
+* worker.js: complete deployed Cloudflare Worker for webhook verification, Kitsu relationships and MyAnimeList portraits via Jikan Edge (AniList/Jikan as backup options), cooldowns, boosts, crates, market, and wallet/card management.
 * schema.sql: D1 schema installed in alyas-db, available to Worker as DB.
 * src/: earlier prototypes only, **not imported by the deployed Worker**.
 * test/: smoke tests (run with npm test in Node 22).
@@ -72,3 +72,18 @@ Finally, the same Worker code was run against a new **isolated temporary D1 data
 Both full-flow tests passed. The temporary diagnostic Worker and test database were deleted after testing. **The real player's database was not modified by these tests.**
 
 A successful upstream test cannot guarantee future availability or that the Yapin image proxy accepts all CDN hosts. The Worker includes timeouts and gracefully degrades when embed images are disallowed.
+
+## Update: 5 November 2026 — Yapin 520 and character portraits
+
+Yapin returned a Cloudflare-generated HTML page with a nested 520 during card sends, sometimes wrapped in HTTP 400. A verified signed bot token was confirmed working against both `bots.yapper.website/api/bot/v1` and `www.yapin.gg/api/bot/v1` for GET /me and GET /commands (HTTP 200 on both). Production now uses `https://www.yapin.gg/api/bot/v1`. The API client no longer repeats HTML errors into chat; it summarizes the upstream problem.
+
+**Images:** The primary Kitsu API returns `media.kitsu.app` artwork, which may be rejected by Yapin's image proxy. New cards with a MAL character ID are enriched via `https://jikan.lucashdo.com/v1/characters/{malId}`, an independently tested MyAnimeList public-data API that returns a character image URL on `cdn.myanimelist.net`, one of Yapin's explicitly accepted embed hosts. If direct MAL embed sending fails, Alya's fetches the image and uploads it as a **native multipart Yapin message attachment** (`payload_json` + `files[0]`). If the server has not enabled file uploads, it returns a card plus a portrait link instead of breaking the roll. No catalogue is imported.
+
+**Tests completed in Cloudflare:**
+- Three API hosts authenticated successfully with the existing Yapin bot secret (6/6 GET checks).
+- Upload format accepted far enough for Yapin to return JSON 404 for intentionally nonexistent channel, not a 400 parser/HTML error. This verifies file-upload request formatting but not delivery to a real server channel.
+- MAL character lookups via Jikan Edge matched five Kitsu Naruto characters by MAL ID; all five MAL image URLs gave HTTP 200.
+- A clone of the deployed Worker ran three *end-to-end provider + embed builder* tests: Naruto, Attack on Titan and random anime (3/3 passed; every MAL artwork URL gave HTTP 200 and the embed included a portrait).
+- Clone and diagnostic Workers were deleted afterward. Production D1 and secrets retained.
+
+**Limitations:** AniList GraphQL currently returns HTTP 403 with a message that this Cloudflare request source is manually blocked. The official MyAnimeList API returns 403 without the required credentials. The tested Jikan Edge service provides read-only MAL data without those credentials; it cannot make AniList remove its access block. No provider can guarantee 100% uptime, and user-visible image delivery must still be verified in a real Yapin channel.
