@@ -214,8 +214,31 @@ async function randomCharacterKitsu(anime){
  }
  throw new Error('Kitsu returned no eligible anime characters after four attempts');
 }
+// MyAnimeList character portraits via verified Jikan Edge (MAL IDs supplied by Kitsu).
+// The official MAL API needs a client ID; AniList currently blocks this Worker.
+async function enrichMALPortrait(card){
+ const id=Number(card.characterId);
+ if(!Number.isSafeInteger(id)||id>=0||id<=-2000000000)return card;
+ try{
+  const u='https://jikan.lucashdo.com/v1/characters/'+(-id);
+  const cacheRequest=new Request('https://alyas-cache.invalid/malportrait/v1/'+(-id));
+  const cached=await caches.default.match(cacheRequest).catch(()=>null);
+  let doc=cached?await cached.json():null;
+  if(!doc){
+   const res=await fetch(u,{headers:{Accept:'application/json'},signal:AbortSignal.timeout(3600)});
+   if(!res.ok)throw new Error('Jikan Edge HTTP '+res.status);
+   doc=await res.json();
+   if(doc?.data?.malId===-id)
+    void caches.default.put(cacheRequest,new Response(JSON.stringify(doc),{headers:{'Cache-Control':'public,max-age=86400','Content-Type':'application/json'}})).catch(()=>{});
+  }
+  const photo=doc?.data?.imageUrl;
+  if(doc?.data?.malId===-id && /^https:\/\/cdn\.myanimelist\.net\/images\/characters\//.test(photo||''))
+   return {...card,image:photo,source:'myanimelist'};
+ }catch(e){console.warn('MAL character portrait not available; keeping Kitsu image',String(e))}
+ return card;
+}
 async function randomCharacter(anime,env){
- try{return await withDeadline(randomCharacterKitsu(anime),9000,'Kitsu lookup timed out')}
+ try{const selected=await withDeadline(randomCharacterKitsu(anime),9000,'Kitsu lookup timed out');return await enrichMALPortrait(selected)}
  catch(primary){
   // Invalid search or missing characters is a useful user error, not a provider outage.
   if(/No anime matching|No illustrated characters found/.test(String(primary.message||primary)))throw primary;
@@ -278,7 +301,8 @@ function cardEmbed(card,footer){
    {name:'Mint',value:uid(card.mint||card.mint_number),inline:true},
    {name:'Edition',value:card.edition||'Standard',inline:true}
   ],
-  footer:{text:footer||("Alya's • "+(/media\.kitsu\.(app|io)/.test(String(card.image||card.image_url||""))?"Kitsu character catalogue":((card.mediaId||card.anilist_media_id)<0?"MyAnimeList character catalogue":"AniList character catalogue")))}};
+  ...( /^https:\/\/cdn\.myanimelist\.net\/images\/characters\//.test(card.image||card.image_url||'')?{image:{url:card.image||card.image_url}}:{}),
+  footer:{text:footer||("Alya's • "+(/^https:\/\/cdn\.myanimelist\.net\//.test(String(card.image||card.image_url||""))?"MyAnimeList portrait via Jikan Edge":(/media\.kitsu\.(app|io)/.test(String(card.image||card.image_url||""))?"Kitsu character catalogue":"AniList")))}};
 }
 async function reply(ev,env,body){
  const data=ev.data, type=ev.event||ev.type;
@@ -302,7 +326,18 @@ async function sendCardWithArtwork(env,ch,payload,artUrl,oldMessageId=null){
  })};
  const imageUrl=imageSafe(artUrl)?artUrl:null;
  let sent=null;
- if(imageUrl){
+ // MAL's CDN is on Yapin's explicitly allowed image-host list. Prefer a
+ // single embed with a native portrait; fall back to a picture attachment.
+ if(imageUrl && /^https:\/\/cdn\.myanimelist\.net\/images\/characters\//.test(imageUrl)){
+  try{
+   const rich={...payload,embeds:(payload.embeds||[]).map(embed=>({...embed,image:{url:imageUrl}}))};
+   sent=await send(env,ch,rich);
+  }catch(e){
+   console.warn('Yapin embed image rejected; trying native picture upload',String(e));
+  }
+ }
+
+ if(imageUrl&&!sent){
   try{
    const remote=await fetch(imageUrl,{headers:{Accept:'image/*'},signal:AbortSignal.timeout(5500)});
    if(!remote.ok)throw new Error('Image source HTTP '+remote.status);
