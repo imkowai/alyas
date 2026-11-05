@@ -48,7 +48,7 @@ function rarity(boosted=false) {
  return 'common';
 }
 const imageSafe = u => typeof u==='string' &&
- /^https:\/\/(?:s4\.anilist\.co|cdn\.myanimelist\.net)\//i.test(u) ? u : null;
+ /^https:\/\/(?:s4\.anilist\.co|cdn\.myanimelist\.net|media\.kitsu\.app|media\.kitsu\.io)\//i.test(u) ? u : null;
 let anilistUnavailableUntil=0;
 async function anilist(query,variables){
  const key='https://alyas-cache.invalid/anilist/v2/'+encodeURIComponent(JSON.stringify({query,variables}));
@@ -142,19 +142,89 @@ async function randomCharacterJikan(anime,base='https://api.jikan.moe/v4'){
  }
  throw new Error('Jikan returned no eligible illustrated characters.');
 }
+const KITSU='https://kitsu.io/api/edge';
+let kitsuRelationsCount=208820; // live metadata count; refreshed from every response
+async function kitsuGet(path){
+ const res=await fetch(KITSU+path,{headers:{'Accept':'application/vnd.api+json'},
+   signal:AbortSignal.timeout(5000)});
+ if(!res.ok)throw new Error('Kitsu HTTP '+res.status);
+ const data=await res.json();
+ if(!data || !Array.isArray(data.data))throw new Error('Kitsu response missing data');
+ return data;
+}
+function fromKitsuRelationSet(result){
+ const characters=new Map((result.included||[]).filter(x=>x.type==='characters').map(x=>[x.id,x]));
+ const anime=new Map((result.included||[]).filter(x=>x.type==='anime').map(x=>[x.id,x]));
+ return (result.data||[]).map(rel=>{
+  const charId=rel.relationships?.character?.data?.id;
+  const mediaRef=rel.relationships?.media?.data;
+  if(mediaRef?.type!=='anime')return null;
+  const ch=characters.get(charId),show=anime.get(mediaRef.id);
+  const img=ch?.attributes?.image?.large;
+  const title=show?.attributes?.canonicalTitle||show?.attributes?.titles?.en||show?.attributes?.slug;
+  const charName=ch?.attributes?.canonicalName||ch?.attributes?.name;
+  if(!title||!charName||!imageSafe(img)||show.attributes?.ageRating==='R18')return null;
+  const malCharId=Number(ch.attributes.malId),malMediaId=Number(show.attributes.malId);
+  return {
+   // Preserve mint numbers across earlier Jikan/MAL rolls where MAL IDs match.
+   characterId:malCharId>0?-malCharId:(-2000000000-Number(ch.id)),
+   mediaId:malMediaId>0?-malMediaId:(-2000000000-Number(show.id)),
+   name:charName,anime:title,image:img,source:'kitsu'
+  };
+ }).filter(Boolean);
+}
+async function randomCharacterKitsu(anime){
+ const search=(anime||'').trim();
+ if(search){
+  const found=await kitsuGet('/anime?filter%5Btext%5D='+encodeURIComponent(search)+'&page%5Blimit%5D=12');
+  const list=(found.data||[]).filter(x=>x?.id && x?.attributes?.ageRating!=='R18');
+  if(!list.length)throw new Error('No anime matching "'+search+'"');
+  const exact=list.find(x=>[
+   x.attributes.canonicalTitle,x.attributes.titles?.en,x.attributes.titles?.en_jp,
+   x.attributes.titles?.ja_jp,x.attributes.slug
+  ].some(v=>typeof v==='string'&&v.toLowerCase()===search.toLowerCase()));
+  const choices=exact?[exact,...list.filter(x=>x.id!==exact.id)]:list;
+  for(const show of choices.slice(0,4)){
+   let data=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20');
+   const total=Number(data.meta?.count||0);
+   if(total>20){
+    const offset=rand(total-19);
+    const alt=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20&page%5Boffset%5D='+offset);
+    if(alt.included?.length)data=alt;
+   }
+   const chars=(data.included||[]).filter(c=>c.type==='characters'&&c.attributes?.canonicalName&&imageSafe(c.attributes.image?.large));
+   if(!chars.length)continue;
+   const c=choose(chars);
+   const malId=Number(c.attributes.malId),malMediaId=Number(show.attributes.malId);
+   return {
+    characterId:malId>0?-malId:-2000000000-Number(c.id),
+    mediaId:malMediaId>0?-malMediaId:-2000000000-Number(show.id),
+    name:c.attributes.canonicalName,anime:show.attributes.canonicalTitle||search,
+    image:c.attributes.image.large,source:'kitsu'
+   };
+  }
+  throw new Error('No illustrated characters found for "'+search+'"');
+ }
+ for(let i=0;i<4;i++){
+  const offset=rand(Math.max(1,kitsuRelationsCount-19));
+  const data=await kitsuGet('/media-characters?include=character,media&page%5Blimit%5D=20&page%5Boffset%5D='+offset);
+  if(Number(data.meta?.count)>0)kitsuRelationsCount=Number(data.meta.count);
+  const choices=fromKitsuRelationSet(data);
+  if(choices.length)return choose(choices);
+ }
+ throw new Error('Kitsu returned no eligible anime characters after four attempts');
+}
 async function randomCharacter(anime,env){
- const failures=[];
- if(Date.now()>=anilistUnavailableUntil){
-  try{return await withDeadline(randomCharacterAniList(anime),4000,'AniList timeout')}
-  catch(err){failures.push('AniList '+String(err.message||err).slice(0,70));}
- }else failures.push('AniList unavailable');
- // Tenrai is a cached public MAL catalogue API, supports character lookup and bots.
- try{return await withDeadline(randomCharacterJikan(anime,'https://api.tenrai.org/v1'),8000,'Tenrai timeout')}
- catch(err){failures.push('Tenrai '+String(err.message||err).slice(0,70));}
- // Jikan is last resort, since its live MAL scraper can stall.
- try{return await withDeadline(randomCharacterJikan(anime),5000,'Jikan timeout')}
- catch(err){failures.push('Jikan '+String(err.message||err).slice(0,70));}
- throw new Error('All anime data providers failed: '+failures.join('; ').slice(0,260));
+ try{return await withDeadline(randomCharacterKitsu(anime),9000,'Kitsu lookup timed out')}
+ catch(primary){
+  // Invalid search or missing characters is a useful user error, not a provider outage.
+  if(/No anime matching|No illustrated characters found/.test(String(primary.message||primary)))throw primary;
+  console.warn('Kitsu provider failed:',String(primary));
+  try{return await withDeadline(randomCharacterAniList(anime),4000,'AniList timed out')}
+  catch(al){console.warn('AniList backup failed:',String(al))}
+  try{return await withDeadline(randomCharacterJikan(anime),4500,'Jikan timed out')}
+  catch(j){throw new Error('Kitsu: '+String(primary.message||primary).slice(0,90)+'; backups unavailable. Please retry.')}
+ }
 }
 async function withDeadline(promise,ms,label){
  let timer;
@@ -167,6 +237,21 @@ async function api(env,method,path,payload){
   body:payload===undefined?undefined:JSON.stringify(payload),signal:AbortSignal.timeout(4500)});
  const raw=await r.text();
  let data={};try{data=raw?JSON.parse(raw):{}}catch{data={error:raw.slice(0,180)}}
+ if(!r.ok && r.status===400 && payload?.embeds?.some(e=>e?.image?.url)){
+  // Some Yapin servers have not enabled the new image proxy for Kitsu's CDN yet.
+  // Retry without the embed image, retaining a clickable image link.
+  const fallback={...payload,embeds:payload.embeds.map(embed=>{
+    if(!embed.image?.url)return embed;
+    const imageUrl=embed.image.url;
+    const {image,...rest}=embed;
+    return {...rest,description:(rest.description||'')+'\n[View character artwork]('+imageUrl+')'};
+  })};
+  const retried=await fetch(API+path,{method,headers:{Authorization:'Bot '+env.YAPIN_BOT_TOKEN,'Content-Type':'application/json'},
+    body:JSON.stringify(fallback),signal:AbortSignal.timeout(4500)});
+  const body=await retried.text();
+  if(!retried.ok)throw new Error('Yapin API '+retried.status+': '+body.slice(0,180));
+  try{return body?JSON.parse(body):{}}catch{return {}}
+ }
  if(!r.ok)throw new Error('Yapin API '+r.status+': '+(data.error||data.message||'request failed'));
  return data;
 }
@@ -200,7 +285,7 @@ function cardEmbed(card,footer){
    {name:'Mint',value:uid(card.mint||card.mint_number),inline:true},
    {name:'Edition',value:card.edition||'Standard',inline:true}
   ],...(imageSafe(card.image||card.image_url)?{image:{url:card.image||card.image_url}}:{}),
-  footer:{text:footer||("Alya's • character data via "+((card.mediaId||card.anilist_media_id)<0?'MyAnimeList / Jikan':'AniList'))}};
+  footer:{text:footer||("Alya's • "+(/media\.kitsu\.(app|io)/.test(String(card.image||card.image_url||""))?"Kitsu character catalogue":((card.mediaId||card.anilist_media_id)<0?"MyAnimeList character catalogue":"AniList character catalogue")))}};
 }
 async function reply(ev,env,body){
  const data=ev.data, type=ev.event||ev.type;
@@ -427,7 +512,7 @@ async function handleCommand(ev,env){
     }
    }catch(err){
     console.error('Roll failed',String(err));
-    result='❌ **Roll failed:** '+errMsg(err)+' No credits should be spent if the card was not issued.';
+    result='❌ **Roll failed:** '+errMsg(err)+' Check /collection and /credits before retrying.';
    }
    await editOrSend(env,ch,msgId,{content:result,embeds,components});
    return;
