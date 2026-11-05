@@ -21,7 +21,11 @@ Event webhook: https://alyas-bot.revidue.workers.dev/webhook
 | Command | Meaning |
 | --- | --- |
 | /roll | Roll randomly across Kitsu anime-character relationships, then enrich the selected character with MAL artwork when available, for 10 credits; card auto-kept |
-| /roll Naruto | Preview a random Naruto character; costs 1,000 credits (100x) only if you click Keep |
+| /roll Naruto | Preview a Naruto character; costs 1,000 credits (100x) only if you click Keep |
+| /roll Alya | Recognise the full anime *Alya Sometimes Hides Her Feelings in Russian*; fetch a real cast member from MyAnimeList if Kitsu has no cast |
+| /roll Roshidere | Same Alya anime, using its Japanese nickname |
+| /roll JJK | Resolves to *Jujutsu Kaisen* (original series, not an unrelated sequel) |
+| /roll JJK Season 2 | Explicitly target the second season |
 | /credits | Show virtual credits |
 | /collection | Show the latest 20 cards in your collection |
 | /card #0001 | View a card's art, UID and mint number |
@@ -87,3 +91,13 @@ Yapin returned a Cloudflare-generated HTML page with a nested 520 during card se
 - Clone and diagnostic Workers were deleted afterward. Production D1 and secrets retained.
 
 **Limitations:** AniList GraphQL currently returns HTTP 403 with a message that this Cloudflare request source is manually blocked. The official MyAnimeList API returns 403 without the required credentials. The tested Jikan Edge service provides read-only MAL data without those credentials; it cannot make AniList remove its access block. No provider can guarantee 100% uptime, and user-visible image delivery must still be verified in a real Yapin channel.
+
+## Anime search, nicknames and seasons (5 November 2026)
+
+`/roll ANIME_NAME` supports thousands of catalogue titles using **live Kitsu search**, plus more than 70 familiar nicknames and abbreviations in `worker.js`'s `ANIME_ALIASES` table. No full anime or character catalogue is imported.
+
+Sample recognized names: `Alya`, `Roshidere`, `JJK`, `MHA`, `AOT`, `KNY`, `FMAB`, `ReZero`, `COTE`, `Bocchi`, `Frieren`, `Kaguya`, `Konosuba`, `Mushoku`, `Oshi no Ko`, `Spy Family`, `Solo Leveling`, `Lycoreco`, `Naruto`, and `One Piece`. Spaced, capitalized, punctuated and quoted variants are normalized; season suffixes such as `Alya Season 2`, `Alya S2`, `Alya2`, `JJK2` and `JJK Season 2` are supported. An unspecified season prefers the original series. Requests with no plausible title match fail instead of silently picking an unrelated show.
+
+**Missing character casts:** Some newer Kitsu entries, including Alya, Oshi no Ko and Frieren, have an anime entry but no linked cast. The bot now retrieves the series' exact MyAnimeList ID from `/anime/:id/mappings` (`myanimelist/anime`) and fetches its real cast and portraits through `https://jikan.lucashdo.com/v1/anime/:malId/characters`. Example: `/roll Alya` maps to MAL anime **54744** and chooses from its actual character list. Its MAL images are hosted at `cdn.myanimelist.net`, a Yapin-supported embed host. If the Jikan Edge request fails, no card is silently fabricated; the roll reports an error. Claiming a targeted preview still costs 100× the normal 10-credit roll.
+
+**Cloudflare integration tests:** 24/24 live title matches passed, including corrected ReZero, plus a full `/roll Alya` candidate test returning Hikaru Kiyomiya with an HTTP 200 MAL portrait. Exact matched titles and cast data were checked against the API, and tests were performed in a temporary cloned Worker without touching production cards. Local regression tests live in `test/anime-title.test.js` and cover aliases, seasons, ranking and false-match rejection. External APIs can still occasionally time out or rate-limit.
