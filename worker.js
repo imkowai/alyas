@@ -173,18 +173,128 @@ function fromKitsuRelationSet(result){
   };
  }).filter(Boolean);
 }
+// Common abbreviations and franchise nicknames; character records remain on-demand.
+const ANIME_ALIASES=Object.freeze({
+ 'alya':'Alya Sometimes Hides Her Feelings in Russian',
+ 'roshidere':'Alya Sometimes Hides Her Feelings in Russian',
+ 'alya russian':'Alya Sometimes Hides Her Feelings in Russian',
+ 'russian alya':'Alya Sometimes Hides Her Feelings in Russian',
+ 'jjk':'Jujutsu Kaisen','sorcery fight':'Jujutsu Kaisen',
+ 'mha':'My Hero Academia','bnha':'My Hero Academia','boku no hero':'My Hero Academia',
+ 'aot':'Attack on Titan','snk':'Attack on Titan','shingeki no kyojin':'Attack on Titan',
+ 'kny':'Demon Slayer: Kimetsu no Yaiba','demon slayer':'Demon Slayer: Kimetsu no Yaiba',
+ 'opm':'One Punch Man','one punch':'One Punch Man',
+ 'csm':'Chainsaw Man','chainsaw':'Chainsaw Man',
+ 'dbz':'Dragon Ball Z','dbs':'Dragon Ball Super','dragonball':'Dragon Ball',
+ 'fmab':'Fullmetal Alchemist: Brotherhood','fma brotherhood':'Fullmetal Alchemist: Brotherhood',
+ 'fma':'Fullmetal Alchemist','fullmetal':'Fullmetal Alchemist',
+ 'sao':'Sword Art Online','sword art':'Sword Art Online',
+ 'ngnl':'No Game No Life','mp100':'Mob Psycho 100',
+ 'mob psycho':'Mob Psycho 100','nge':'Neon Genesis Evangelion',
+ 're zero':'Re:ZERO -Starting Life in Another World-',
+ 'rezero':'Re:ZERO -Starting Life in Another World-',
+ 'konosuba':'KonoSuba: God’s Blessing on This Wonderful World!',
+ 'mushoku':'Mushoku Tensei: Jobless Reincarnation',
+ 'jobless reincarnation':'Mushoku Tensei: Jobless Reincarnation',
+ 'tensura':'That Time I Got Reincarnated as a Slime',
+ 'slime isekai':'That Time I Got Reincarnated as a Slime',
+ 'bunny girl':'Rascal Does Not Dream of Bunny Girl Senpai',
+ 'bunny girl senpai':'Rascal Does Not Dream of Bunny Girl Senpai',
+ 'aobuta':'Rascal Does Not Dream of Bunny Girl Senpai',
+ 'cote':'Classroom of the Elite','you zitsu':'Classroom of the Elite',
+ 'oregairu':'My Teen Romantic Comedy SNAFU',
+ 'oreigairu':'My Teen Romantic Comedy SNAFU',
+ 'onk':'Oshi no Ko','oshinoko':'Oshi no Ko',
+ 'kaguya':'Kaguya-sama: Love is War','love is war':'Kaguya-sama: Love is War',
+ 'frieren':'Frieren: Beyond Journey’s End',
+ 'bocchi':'Bocchi the Rock!','btr':'Bocchi the Rock!',
+ 'komi':'Komi Can’t Communicate',
+ 'nagatoro':'Don’t Toy with Me, Miss Nagatoro',
+ 'lycoreco':'Lycoris Recoil','lyco reco':'Lycoris Recoil',
+ 'spy family':'SPY x FAMILY','sxf':'SPY x FAMILY',
+ 'dandadan':'DAN DA DAN','solo levelling':'Solo Leveling',
+ 'kusuriya':'The Apothecary Diaries','apothecary':'The Apothecary Diaries',
+ 'ao no hako':'Blue Box',
+ 'danmachi':'Is It Wrong to Try to Pick Up Girls in a Dungeon?',
+ 'food wars':'Food Wars! Shokugeki no Soma',
+ 'shokugeki':'Food Wars! Shokugeki no Soma',
+ 'bsd':'Bungo Stray Dogs','bungo':'Bungo Stray Dogs',
+ 'kuroshitsuji':'Black Butler','case closed':'Detective Conan',
+ 'jjba':'JoJo’s Bizarre Adventure','jojo':'JoJo’s Bizarre Adventure',
+ 'ylia':'Your Lie in April','your lie':'Your Lie in April',
+ 'kimi no na wa':'Your Name.',
+ 'yofukashi':'Call of the Night',
+ 'iruma':'Welcome to Demon School! Iruma-kun',
+ 'dxd':'High School DxD',
+ 'dragon maid':'Miss Kobayashi’s Dragon Maid',
+ 'maid dragon':'Miss Kobayashi’s Dragon Maid',
+ 'ggo':'Sword Art Online Alternative: Gun Gale Online'
+});
+export function normalizeAnimeTitle(value){
+ return String(value||'').normalize('NFKC').toLowerCase()
+  .replace(/[‘’'"\x60]/g,'').replace(/&/g,' and ')
+  .replace(/[\u2010-\u2015]/g,' ')
+  .replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim();
+}
+export function resolveAnimeQuery(userInput){
+ const original=String(userInput||'').trim().replace(/^["']+|["']+$/g,'').slice(0,140);
+ let key=normalizeAnimeTitle(original);
+ if(key.endsWith(' anime')&&key.length>6)key=key.slice(0,-6).trim();
+ let season=null,base=key;
+ const named=key.match(/^(.+?)\s+(?:season|s)\s*(\d{1,2})$/);
+ const compact=key.match(/^([a-z]{2,12})([2-9])$/);
+ if(named && +named[2]>=2){base=named[1];season=+named[2];}
+ else if(compact&&ANIME_ALIASES[compact[1]]){base=compact[1];season=+compact[2];}
+ const resolved=ANIME_ALIASES[base]||original;
+ const query=season!==null?resolved+' Season '+season:resolved;
+ return{original,query,season,aliasFound:!!ANIME_ALIASES[base]};
+}
+function animeTitles(show){
+ const a=show?.attributes||{};
+ return[a.canonicalTitle,...Object.values(a.titles||{}),
+  ...(Array.isArray(a.abbreviatedTitles)?a.abbreviatedTitles:[]),a.slug]
+  .filter(x=>typeof x==='string');
+}
+function sequelPenalty(show,explicitSeason){
+ if(explicitSeason!==null)return 0;
+ const a=show?.attributes||{};
+ const primary=normalizeAnimeTitle(a.titles?.en||a.canonicalTitle||'');
+ return /\b(?:season\s*[2-9]|(?:2nd|3rd|[4-9]th)\s+season|part\s*[2-9]|recap|special|movie|ova|ona|spin\s*off|final\s+season)\b/.test(primary)?-140:0;
+}
+export function rankAnimeMatches(shows,queryInfo){
+ const requested=normalizeAnimeTitle(queryInfo.original);
+ const wanted=normalizeAnimeTitle(queryInfo.query);
+ const tokens=wanted.split(' ').filter(x=>x.length>=2);
+ return[...shows].map((show,index)=>{
+  const titles=animeTitles(show).map(normalizeAnimeTitle).filter(Boolean);
+  let best=0;
+  for(const title of titles){
+   if(title===wanted)best=Math.max(best,1000);
+   else if(title===requested)best=Math.max(best,850);
+   else if(wanted&&title.startsWith(wanted+' '))best=Math.max(best,560);
+   else if(wanted&&title.includes(' '+wanted+' '))best=Math.max(best,440);
+   else if(requested.length>=3&&title.startsWith(requested+' '))best=Math.max(best,360);
+   else if(requested.length>=4&&title.includes(' '+requested+' '))best=Math.max(best,290);
+   else if(tokens.length>1&&tokens.every(t=>title.split(' ').some(w=>w.startsWith(t))))
+    best=Math.max(best,220);
+  }
+  if(best===0&&index===0)best=100;
+  return{show,score:best+sequelPenalty(show,queryInfo.season),index};
+ }).sort((a,b)=>b.score-a.score||a.index-b.index).map(x=>x.show);
+}
 async function randomCharacterKitsu(anime){
  const search=(anime||'').trim();
  if(search){
-  const found=await kitsuGet('/anime?filter%5Btext%5D='+encodeURIComponent(search)+'&page%5Blimit%5D=12');
-  const list=(found.data||[]).filter(x=>x?.id && x?.attributes?.ageRating!=='R18');
-  if(!list.length)throw new Error('No anime matching "'+search+'"');
-  const exact=list.find(x=>[
-   x.attributes.canonicalTitle,x.attributes.titles?.en,x.attributes.titles?.en_jp,
-   x.attributes.titles?.ja_jp,x.attributes.slug
-  ].some(v=>typeof v==='string'&&v.toLowerCase()===search.toLowerCase()));
-  const choices=exact?[exact,...list.filter(x=>x.id!==exact.id)]:list;
-  for(const show of choices.slice(0,4)){
+  const queryInfo=resolveAnimeQuery(search);
+  let found=await kitsuGet('/anime?filter%5Btext%5D='+encodeURIComponent(queryInfo.query)+'&page%5Blimit%5D=20');
+  let list=(found.data||[]).filter(x=>x?.id&&x?.attributes?.ageRating!=='R18');
+  if(!list.length&&queryInfo.aliasFound&&normalizeAnimeTitle(queryInfo.query)!==normalizeAnimeTitle(queryInfo.original)){
+   found=await kitsuGet('/anime?filter%5Btext%5D='+encodeURIComponent(queryInfo.original)+'&page%5Blimit%5D=20');
+   list=(found.data||[]).filter(x=>x?.id&&x?.attributes?.ageRating!=='R18');
+  }
+  if(!list.length)throw new Error('No anime found for "'+search+'". Try the full title.');
+  const choices=rankAnimeMatches(list,queryInfo);
+  for(const show of choices.slice(0,7)){
    let data=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20');
    const total=Number(data.meta?.count||0);
    if(total>20){
@@ -199,7 +309,7 @@ async function randomCharacterKitsu(anime){
    return {
     characterId:malId>0?-malId:-2000000000-Number(c.id),
     mediaId:malMediaId>0?-malMediaId:-2000000000-Number(show.id),
-    name:c.attributes.canonicalName,anime:show.attributes.canonicalTitle||search,
+    name:c.attributes.canonicalName,anime:show.attributes.titles?.en||show.attributes.canonicalTitle||search,
     image:c.attributes.image.large,source:'kitsu'
    };
   }
@@ -553,7 +663,10 @@ async function handleCommand(ev,env){
  const data=ev.data, db=env.DB, id=String(data.user_id||data.author_id||''), ch=data.channel_id;
  if(!id||!ch)return;
  const name=String(data.command||'').replace(/^\//,'').toLowerCase();
- const args=String(data.args||'').trim();
+ const rawArgs=data.args??data.arguments??'';
+ const args=(typeof rawArgs==='string'?rawArgs:Array.isArray(rawArgs)?rawArgs.join(' '):
+  typeof rawArgs==='object'?String(rawArgs.anime??rawArgs.query??rawArgs.name??rawArgs.value??Object.values(rawArgs).join(' ')):String(rawArgs)).trim()||
+  (typeof data.content==='string'&&/^\/\w+\s+/.test(data.content)?data.content.replace(/^\/\w+\s+/,'').trim():'');
  try{
   let result, embeds, components, detailArtUrl=null;
   if(name==='roll'){
