@@ -1,6 +1,6 @@
 // Alya's — standalone Cloudflare Worker for Yapin'.
 // Character metadata is fetched on demand; only player assets are persisted.
-const API = 'https://bots.yapper.website/api/bot/v1';
+const API = 'https://www.yapin.gg/api/bot/v1';
 const ANI = 'https://graphql.anilist.co';
 const RARITIES = [
  ['common','55'],['uncommon','25'],['rare','15'],['epic','4.5'],
@@ -233,26 +233,19 @@ async function withDeadline(promise,ms,label){
 }
 async function api(env,method,path,payload){
  if(!env.YAPIN_BOT_TOKEN)throw new Error('Yapin bot token is not configured.');
- const r=await fetch(API+path,{method,headers:{Authorization:'Bot '+env.YAPIN_BOT_TOKEN,'Content-Type':'application/json'},
-  body:payload===undefined?undefined:JSON.stringify(payload),signal:AbortSignal.timeout(4500)});
- const raw=await r.text();
- let data={};try{data=raw?JSON.parse(raw):{}}catch{data={error:raw.slice(0,180)}}
- if(!r.ok && r.status===400 && payload?.embeds?.some(e=>e?.image?.url)){
-  // Some Yapin servers have not enabled the new image proxy for Kitsu's CDN yet.
-  // Retry without the embed image, retaining a clickable image link.
-  const fallback={...payload,embeds:payload.embeds.map(embed=>{
-    if(!embed.image?.url)return embed;
-    const imageUrl=embed.image.url;
-    const {image,...rest}=embed;
-    return {...rest,description:(rest.description||'')+'\n[View character artwork]('+imageUrl+')'};
-  })};
-  const retried=await fetch(API+path,{method,headers:{Authorization:'Bot '+env.YAPIN_BOT_TOKEN,'Content-Type':'application/json'},
-    body:JSON.stringify(fallback),signal:AbortSignal.timeout(4500)});
-  const body=await retried.text();
-  if(!retried.ok)throw new Error('Yapin API '+retried.status+': '+body.slice(0,180));
-  try{return body?JSON.parse(body):{}}catch{return {}}
+ const response=await fetch(API+path,{
+  method,headers:{Authorization:'Bot '+env.YAPIN_BOT_TOKEN,'Content-Type':'application/json','Accept':'application/json'},
+  body:payload===undefined?undefined:JSON.stringify(payload),
+  signal:AbortSignal.timeout(6500)
+ });
+ const raw=await response.text();
+ let data={};try{data=raw?JSON.parse(raw):{}}catch{}
+ if(!response.ok){
+  const isHtml=/<!DOCTYPE|<html[\s>]|Cloudflare|Web server is/i.test(raw);
+  if(isHtml)throw new Error('Yapin upstream server or image proxy failed (HTTP '+response.status+'). Try again in a moment.');
+  const msg=typeof data.error==='string'?data.error:typeof data.message==='string'?data.message:'Request rejected';
+  throw new Error('Yapin API '+response.status+': '+msg.slice(0,180));
  }
- if(!r.ok)throw new Error('Yapin API '+r.status+': '+(data.error||data.message||'request failed'));
  return data;
 }
 async function verifySignature(secret,body,sig){
@@ -284,7 +277,7 @@ function cardEmbed(card,footer){
    {name:'Card UID',value:card.uid&&String(card.uid).startsWith('#')?card.uid:uid(card.uid),inline:true},
    {name:'Mint',value:uid(card.mint||card.mint_number),inline:true},
    {name:'Edition',value:card.edition||'Standard',inline:true}
-  ],...(imageSafe(card.image||card.image_url)?{image:{url:card.image||card.image_url}}:{}),
+  ],
   footer:{text:footer||("Alya's • "+(/media\.kitsu\.(app|io)/.test(String(card.image||card.image_url||""))?"Kitsu character catalogue":((card.mediaId||card.anilist_media_id)<0?"MyAnimeList character catalogue":"AniList character catalogue")))}};
 }
 async function reply(ev,env,body){
@@ -298,6 +291,54 @@ async function reply(ev,env,body){
 }
 async function send(env,ch,body){
  return api(env,'POST','/channels/'+encodeURIComponent(ch)+'/messages',body);
+}
+async function sendCardWithArtwork(env,ch,payload,artUrl,oldMessageId=null){
+ // Kitsu images are not on every Yapin embed whitelist, and remote embed
+ // fetching can cause Yapin's own proxy to return HTML 520 errors.
+ // Upload the artwork to Yapin instead; it renders as a native picture.
+ const safePayload={...payload,embeds:(payload.embeds||[]).map(embed=>{
+  const {image,...rest}=embed;
+  return rest;
+ })};
+ const imageUrl=imageSafe(artUrl)?artUrl:null;
+ let sent=null;
+ if(imageUrl){
+  try{
+   const remote=await fetch(imageUrl,{headers:{Accept:'image/*'},signal:AbortSignal.timeout(5500)});
+   if(!remote.ok)throw new Error('Image source HTTP '+remote.status);
+   const kind=String(remote.headers.get('content-type')||'').split(';')[0].toLowerCase();
+   if(!['image/jpeg','image/png','image/webp','image/gif'].includes(kind))
+    throw new Error('Unsupported image content type');
+   const length=Number(remote.headers.get('content-length')||0);
+   if(length>6000000)throw new Error('Image too large');
+   const bytes=await remote.arrayBuffer();
+   if(bytes.byteLength>6000000)throw new Error('Image too large');
+   const suffix=kind==='image/png'?'png':kind==='image/webp'?'webp':kind==='image/gif'?'gif':'jpg';
+   const form=new FormData();
+   form.append('payload_json',JSON.stringify(safePayload));
+   form.append('files[0]',new Blob([bytes],{type:kind}),'Alyas-'+Date.now()+'.'+suffix);
+   const res=await fetch(API+'/channels/'+encodeURIComponent(ch)+'/messages',{
+    method:'POST',headers:{Authorization:'Bot '+env.YAPIN_BOT_TOKEN},
+    body:form,signal:AbortSignal.timeout(9000)
+   });
+   const raw=await res.text();
+   if(!res.ok){
+    if(/<!DOCTYPE|<html[\s>]|Web server is/i.test(raw))
+     throw new Error('Yapin image upload upstream returned HTML (HTTP '+res.status+')');
+    let err={};try{err=JSON.parse(raw)}catch{}
+    throw new Error('Image upload HTTP '+res.status+': '+String(err.error||err.message||'Unavailable').slice(0,100));
+   }
+   try{sent=raw?JSON.parse(raw):{}}catch{sent={}}
+  }catch(e){
+   console.warn('Yapin character art upload failed; falling back to a text/link card:',String(e));
+  }
+ }
+ if(!sent){
+  const fallback={...safePayload,content:(safePayload.content||'')+(imageUrl?'\n[View character portrait]('+imageUrl+')':'')};
+  sent=await send(env,ch,fallback);
+ }
+ if(oldMessageId)try{await api(env,'DELETE','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(oldMessageId))}catch{}
+ return sent;
 }
 async function editOrSend(env,ch,id,body){
  if(id){
@@ -479,7 +520,7 @@ async function handleCommand(ev,env){
  const name=String(data.command||'').replace(/^\//,'').toLowerCase();
  const args=String(data.args||'').trim();
  try{
-  let result, embeds, components;
+  let result, embeds, components, detailArtUrl=null;
   if(name==='roll'){
    // Ack slash-command quickly. Never depend on editing an interaction response:
    // Yapin can return 204/no message ID for interaction callbacks.
@@ -490,9 +531,10 @@ async function handleCommand(ev,env){
    // If the channel send fails, surface an error through normal event handling.
    const started=await send(env,ch,{content:'🎲 **Shuffling the cards...** ✦'});
    const msgId=started?.message?.id||started?.id||null;
-   let result,embeds=[],components=[];
+   let result,embeds=[],components=[],artUrl=null;
    try{
     const candidate=await withDeadline(reserveRoll(db,id,args,env),13500,'Character lookup timed out; please retry.');
+    artUrl=candidate.image;
     if(msgId){
      try{await api(env,'PATCH','/channels/'+encodeURIComponent(ch)+'/messages/'+encodeURIComponent(msgId),{content:'✨ **Revealing your card...**'})}catch(err){console.warn('Roll frame update unavailable',String(err))}
     }
@@ -514,7 +556,8 @@ async function handleCommand(ev,env){
     console.error('Roll failed',String(err));
     result='❌ **Roll failed:** '+errMsg(err)+' Check /collection and /credits before retrying.';
    }
-   await editOrSend(env,ch,msgId,{content:result,embeds,components});
+   if(artUrl&&embeds.length)await sendCardWithArtwork(env,ch,{content:result,embeds,components},artUrl,msgId);
+   else await editOrSend(env,ch,msgId,{content:result,embeds,components});
    return;
   }
   if(name==='credits'){
@@ -528,6 +571,7 @@ async function handleCommand(ev,env){
    const c=await db.prepare('SELECT * FROM cards WHERE uid=?').bind(intId(args)).first();
    if(!c)throw new Error('Card not found.');
    embeds=[cardEmbed(c,'Card details • Owned by '+c.owner_id)];
+   detailArtUrl=c.image_url;
    result='**'+uid(c.uid)+'** • '+c.character_name;
   }else if(name==='market'){
    const rs=await db.prepare('SELECT l.card_uid,l.price,c.character_name,c.rarity FROM listings l JOIN cards c ON c.uid=l.card_uid ORDER BY l.listed_at DESC LIMIT 20').all();
@@ -544,6 +588,11 @@ async function handleCommand(ev,env){
   }else if(name==='open'){
    result=await openCrate(db,id,env);
   }else return;
+  if(name==='card'&&detailArtUrl){
+   if((ev.event||ev.type)==='command')await api(env,'POST','/interactions/'+encodeURIComponent(data.id)+'/'+encodeURIComponent(data.token)+'/callback',{type:'ack'});
+   await sendCardWithArtwork(env,ch,{content:result,embeds,components},detailArtUrl);
+   return;
+  }
   await reply(ev,env,{content:result,embeds,components});
  }catch(e){
   try{await reply(ev,env,{content:'❌ '+errMsg(e),ephemeral:true})}
@@ -568,8 +617,8 @@ async function handleButton(ev,env){
   {type:'ack'});
  try{
   const card=await claim(env.DB,pid,id);
-  await send(env,data.channel_id,{content:'✅ <@'+id+'> kept their card! **'+card.uid+'**',
-   embeds:[cardEmbed(card,'Added to collection • '+nfmt(card.cost)+' credits spent')]});
+  await sendCardWithArtwork(env,data.channel_id,{content:'✅ <@'+id+'> kept their card! **'+card.uid+'**',
+   embeds:[cardEmbed(card,'Added to collection • '+nfmt(card.cost)+' credits spent')]},card.image);
  }catch(e){await send(env,data.channel_id,{content:'❌ <@'+id+'> '+errMsg(e)})}
 }
 async function processEvent(ev,env){
