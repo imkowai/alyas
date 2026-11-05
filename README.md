@@ -3,7 +3,7 @@
 Backend: https://alyas-bot.revidue.workers.dev
 Event webhook: https://alyas-bot.revidue.workers.dev/webhook
 
-**Status:** Worker deployed and D1 schema installed. To go live in Yapin', add two encrypted secrets, set the webhook URL, and send the test event from the Yapin' developer portal.
+**Status (4 Nov 2026):** Worker deployed, D1 schema installed, both Cloudflare secrets present, and Cloudflare `/health` returns `configured: true`. Successful signed Yapin' event delivery has been observed previously. The full Kitsu fetch-and-card-mint flow was tested separately using a temporary test database.
 
 ## Connect your existing Yapin' application
 
@@ -20,7 +20,7 @@ Event webhook: https://alyas-bot.revidue.workers.dev/webhook
 
 | Command | Meaning |
 | --- | --- |
-| /roll | Roll randomly from AniList for 10 credits; card auto-kept |
+| /roll | Roll randomly from Kitsu's on-demand anime-character catalogue for 10 credits; card auto-kept |
 | /roll Naruto | Preview a random Naruto character; costs 1,000 credits (100x) only if you click Keep |
 | /credits | Show virtual credits |
 | /collection | Show the latest 20 cards in your collection |
@@ -39,20 +39,36 @@ Starter players get 1,000 **virtual** credits and one basic crate. /roll cooldow
 
 **Mint** means which copy of a specific character this is: mint #0001 is the first copy of that character ever claimed. Card **UID** is the global card number and starts at #0001. Rarity, UID, and mint are permanent once claimed. The supplied tier weights are proportionally normalized because they sum to slightly over 100%.
 
-An unlisted card's system-copy price is 4x the greater of the rarity reference floor or the median of up to 5 lowest live listings for the same AniList character and rarity. Selling instantly to the system returns 25% of the reference floor. This is a virtual-credit system only; no money purchases.
+An unlisted card's system-copy price is 4x the greater of the rarity reference floor or the median of up to 5 lowest live listings for the same character and rarity. Selling instantly to the system returns 25% of the reference floor. This is a virtual-credit system only; no money purchases.
 
 ## Technology and deployment
 
-* worker.js: complete deployed Cloudflare Worker for webhook verification, AniList queries, cooldowns, boosts, crates, market, and wallet/card management.
+* worker.js: complete deployed Cloudflare Worker for webhook verification, Kitsu character queries (AniList/Jikan emergency backups), cooldowns, boosts, crates, market, and wallet/card management.
 * schema.sql: D1 schema installed in alyas-db, available to Worker as DB.
 * src/: earlier prototypes only, **not imported by the deployed Worker**.
 * test/: smoke tests (run with npm test in Node 22).
 * .github/workflows/test.yml: GitHub Actions test runner.
 
-Only owned cards, their compact metadata snapshots and player assets are stored. **No character catalogue is imported.** When AniList returns an upstream 403, 429, 5xx, or network error, the Worker automatically tries Jikan's MyAnimeList API for on-demand anime and character data. Jikan IDs are stored as negative integers to avoid collisions with positive AniList IDs. Cloudflare caching reduces upstream pressure. A fallback is still unavailable if both providers fail. AniList queries are temporarily cached to limit traffic; imagery must be used in accordance with source and copyright permissions.
+Only owned cards, their compact metadata snapshots and player assets are stored. **No character catalogue is imported.** Kitsu is the primary live catalogue (required HTTP `Accept: application/vnd.api+json`). Generic rolls use randomly sampled anime-character relationship records with `include=character,media` and filter out manga/nonillustrated entries; named anime rolls search the anime title and fetch its illustrated cast. Response image URLs use `media.kitsu.app`; if Yapin rejects the external image host, messages retry without an inline embed image and include a clickable artwork link. AniList and Jikan remain emergency fallback providers; their availability is not guaranteed. Repeated/matched MAL character IDs share mint counters where Kitsu exposes the original MAL ID. Respect anime artwork copyright and source terms.
 
-**Production note:** GitHub pushes do not auto-deploy yet. The Worker is currently deployed manually through Cloudflare's API. Future code edits require a redeploy or a configured Cloudflare Workers Builds integration. A valid bot token and webhook signing secret are still required to activate events.
+**Production note:** GitHub pushes do not auto-deploy yet. The Worker is currently deployed manually through Cloudflare's API. Future code edits require a redeploy or a configured Cloudflare Workers Builds integration. The currently configured bot token and webhook signing secret remain stored only as Cloudflare secrets.
 
-## Upstream 403 troubleshooting
+## Verified Cloudflare integration checks (4 November 2026)
 
-AniList's API documentation states that HTTP 403 may indicate temporarily suspended access or an IP restriction; it is not the normal HTTP 429 rate-limit response. The Worker now treats these as an upstream failure and tries the alternative Jikan/MyAnimeList public API. If the fallback is also unavailable, the bot reports the two provider failures without charging credits. No proxy is used to circumvent AniList access restrictions.
+Kitsu was tested directly from Cloudflare Worker execution, not merely from documentation or a desktop computer. Initial six-source checks returned:
+- Four random anime/character lookups: 4/4 succeeded, yielding illustrations.
+- Named anime lookups for Naruto and Attack on Titan: both succeeded.
+- Naruto character image: HTTP 200.
+
+Then we cloned the **exact deployed production Worker** into a short-lived isolated test Worker and checked:
+- Random character: Allen Walker (D.Gray-man Hallow), Kitsu image HTTP 200.
+- Random character: Kazuko Hosogawa (Tsurezure Children), Kitsu image HTTP 200.
+- Naruto: Hiruzen Sarutobi, Kitsu image HTTP 200.
+- Attack on Titan: Dennis Eibringer, Kitsu image HTTP 200.
+
+Finally, the same Worker code was run against a new **isolated temporary D1 database**:
+- Random roll: minted UID #0001, mint 1 and debited 10 credits (1000 → 990).
+- Targeted Naruto roll: minted UID #0002, mint 1 and debited 1000 credits (1000 → 0).
+Both full-flow tests passed. The temporary diagnostic Worker and test database were deleted after testing. **The real player's database was not modified by these tests.**
+
+A successful upstream test cannot guarantee future availability or that the Yapin image proxy accepts all CDN hosts. The Worker includes timeouts and gracefully degrades when embed images are disallowed.
