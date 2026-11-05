@@ -282,6 +282,38 @@ export function rankAnimeMatches(shows,queryInfo){
   return{show,score:best+sequelPenalty(show,queryInfo.season),index};
  }).filter(x=>x.score>=180).sort((a,b)=>b.score-a.score||a.index-b.index).map(x=>x.show);
 }
+// Kitsu's newest anime entries often have no cast links. Its mappings endpoint
+// still gives an exact MAL ID, which lets Jikan Edge provide real character cards.
+async function randomCharacterFromMALMapping(show){
+ const mapping=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/mappings');
+ const association=(mapping.data||[]).find(x=>x.attributes?.externalSite==='myanimelist/anime');
+ const malAnimeId=Number(association?.attributes?.externalId);
+ if(!Number.isSafeInteger(malAnimeId)||malAnimeId<1)return null;
+ const cacheKey=new Request('https://alyas-cache.invalid/mal-cast/v1/'+malAnimeId);
+ let data=null;
+ const existing=await caches.default.match(cacheKey).catch(()=>null);
+ if(existing)data=await existing.json();
+ if(!data){
+  const res=await fetch('https://jikan.lucashdo.com/v1/anime/'+malAnimeId+'/characters',{
+   headers:{Accept:'application/json'},signal:AbortSignal.timeout(6000)});
+  if(!res.ok)throw new Error('MAL cast API HTTP '+res.status);
+  data=await res.json();
+  if(Array.isArray(data?.data))
+   void caches.default.put(cacheKey,new Response(JSON.stringify(data),{
+    headers:{'Cache-Control':'public,max-age=1800','Content-Type':'application/json'}})).catch(()=>{});
+ }
+ const eligible=(data?.data||[]).filter(c=>Number(c?.malId)>0&&typeof c.name==='string'&&
+  /^https:\/\/cdn\.myanimelist\.net\/images\/characters\//.test(c.imageUrl||''));
+ if(!eligible.length)return null;
+ const ch=choose(eligible);
+ const cleanName=ch.name.replace(/^([^,]+),\s*(.+)$/,(_,surname,rest)=>rest+' '+surname);
+ return{
+  characterId:-Number(ch.malId),mediaId:-malAnimeId,
+  name:cleanName,
+  anime:show.attributes?.titles?.en||show.attributes?.canonicalTitle||'Unknown anime',
+  image:ch.imageUrl,source:'myanimelist'
+ };
+}
 async function randomCharacterKitsu(anime){
  const search=(anime||'').trim();
  if(search){
@@ -296,15 +328,26 @@ async function randomCharacterKitsu(anime){
   }
   if(!choices.length)throw new Error('No matching anime for "'+search+'". Try another title or a longer name.');
   for(const show of choices.slice(0,7)){
-   let data=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20');
-   const total=Number(data.meta?.count||0);
+   const initial=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20');
+   let data=initial;
+   const illustrated=page=>(page.included||[]).filter(c=>
+    c.type==='characters'&&c.attributes?.canonicalName&&imageSafe(c.attributes.image?.large));
+   const total=Number(initial.meta?.count||0);
    if(total>20){
     const offset=rand(total-19);
-    const alt=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20&page%5Boffset%5D='+offset);
-    if(alt.included?.length)data=alt;
+    try{
+     const alt=await kitsuGet('/anime/'+encodeURIComponent(show.id)+'/characters?include=character&page%5Blimit%5D=20&page%5Boffset%5D='+offset);
+     if(illustrated(alt).length)data=alt;
+    }catch(e){console.warn('Cast page lookup failed, using first page',String(e))}
    }
-   const chars=(data.included||[]).filter(c=>c.type==='characters'&&c.attributes?.canonicalName&&imageSafe(c.attributes.image?.large));
-   if(!chars.length)continue;
+   const chars=illustrated(data);
+   if(!chars.length){
+    try{
+     const mapped=await randomCharacterFromMALMapping(show);
+     if(mapped)return mapped;
+    }catch(e){console.warn('Mapped MAL cast unavailable',String(e))}
+    continue;
+   }
    const c=choose(chars);
    const malId=Number(c.attributes.malId),malMediaId=Number(show.attributes.malId);
    return {
@@ -314,7 +357,7 @@ async function randomCharacterKitsu(anime){
     image:c.attributes.image.large,source:'kitsu'
    };
   }
-  throw new Error('No illustrated characters found for "'+search+'"');
+  throw new Error('No illustrated characters found for "'+search+'" in Kitsu or MyAnimeList');
  }
  for(let i=0;i<4;i++){
   const offset=rand(Math.max(1,kitsuRelationsCount-19));
@@ -349,7 +392,7 @@ async function enrichMALPortrait(card){
  return card;
 }
 async function randomCharacter(anime,env){
- try{const selected=await withDeadline(randomCharacterKitsu(anime),9000,'Kitsu lookup timed out');return await enrichMALPortrait(selected)}
+ try{const selected=await withDeadline(randomCharacterKitsu(anime),11000,'Anime cast lookup timed out');return selected.source==='myanimelist'?selected:await enrichMALPortrait(selected)}
  catch(primary){
   // Invalid search or missing characters is a useful user error, not a provider outage.
   if(/No (?:anime matching|anime found|matching anime|illustrated characters found)/.test(String(primary.message||primary)))throw primary;
